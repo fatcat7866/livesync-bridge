@@ -1,0 +1,26 @@
+# fatcat-lsbridge: LiveSync Bridge between fatcat-share and fatcat-katsuya.
+# Config (with secrets) arrives as the Fly secret LSB_CONFIG_JSON (base64) and is
+# written to /app/dat/config.json. No public services: the Bridge only dials out.
+app = "fatcat-lsbridge"
+primary_region = "nrt"
+# The first full read of both databases peaks above 512MB (OOM-killed, 2026-11-05).
+# Swap on the root disk absorbs the peak without a larger (paid) VM.
+swap_size_mb = 1024
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LSB_HEALTH_FILE = "/tmp/lsb-health.json"
+
+[[files]]
+  guest_path = "/app/dat/config.json"
+  secret_name = "LSB_CONFIG_JSON"
+
+[mounts]
+  source = "lsbdata"
+  destination = "/app/data"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
