@@ -1627,3 +1627,102 @@ Deno.test("PeerStorage preserves data after an outgoing read fails", async () =>
         await Deno.remove(baseDir, { recursive: true });
     }
 });
+
+// Received files are judged by the same ignore patterns as outgoing ones. A peer
+// which only filtered what it sends would still accept a write or deletion inside
+// an ignored tree from the hub, and the watcher would then drop the resulting
+// event instead of sending it back, so the stray file would silently stay.
+function makeIgnoringWritePeer(baseDir: string, ignore: string[]) {
+    const { peer, notices } = makeWritePeer(baseDir);
+    peer.config.ignore = ignore;
+    peer.config.ignoreOnReceive = true;
+    const debugs: string[] = [];
+    peer.debugLog = (message) => {
+        debugs.push(message);
+    };
+    return { peer, notices, debugs };
+}
+
+Deno.test("PeerStorage does not write a received file inside an ignored directory", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-ignore-receive-" });
+    try {
+        const { peer, debugs } = makeIgnoringWritePeer(tempDir, IGNORE_PATTERNS);
+        assertEquals(await peer.put(".git/config", textFileData("[core]")), false, "a write inside an ignored directory should be refused");
+        assertEquals(await peer.put("node_modules/pkg/index.js", textFileData("js")), false, "a write below an ignored top-level directory should be refused");
+        assert(debugs.some((message) => message.includes(".git/config") && message.includes("ignored")), "the refused write should be logged as ignored");
+        let exists = true;
+        try {
+            await Deno.stat(join(tempDir, ".git"));
+        } catch (_e) {
+            exists = false;
+        }
+        assert(!exists, "nothing inside the ignored directory should be created");
+
+        assertEquals(await peer.put(".gitignore", textFileData("node_modules")), true, "a similarly named file outside the ignored trees should be saved");
+        assertEquals(await peer.put("notes/keep.md", textFileData("keep")), true, "an unrelated file should be saved");
+        assertEquals(await Deno.readTextFile(join(tempDir, "notes", "keep.md")), "keep", "the unrelated file should be written");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage does not delete an existing file inside an ignored directory", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-ignore-delete-" });
+    try {
+        await makeVaultWithIgnorableTrees(tempDir);
+        const { peer, debugs } = makeIgnoringWritePeer(tempDir, IGNORE_PATTERNS);
+        assertEquals(await peer.delete(".git/config"), false, "a deletion inside an ignored directory should be refused");
+        assertEquals(await Deno.readTextFile(join(tempDir, ".git", "config")), "[core]", "the ignored file should stay untouched");
+        assert(debugs.some((message) => message.includes(".git/config") && message.includes("ignored")), "the refused deletion should be logged as ignored");
+
+        assertEquals(await peer.delete("notes/keep.md"), true, "a deletion outside the ignored trees should be applied");
+        let exists = true;
+        try {
+            await Deno.stat(join(tempDir, "notes", "keep.md"));
+        } catch (_e) {
+            exists = false;
+        }
+        assert(!exists, "the file outside the ignored trees should be deleted");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+// An allow-list is written as one negated brace pattern. Every ancestor directory
+// has to be listed because isIgnored() judges each prefix of the path.
+const ALLOW_LIST_PATTERNS = ["!{notes,notes/**,clients,clients/acme,clients/acme/acme.md}"];
+
+Deno.test("PeerStorage applies a negated allow-list pattern to received writes and deletions", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-allow-list-" });
+    try {
+        const { peer } = makeIgnoringWritePeer(tempDir, ALLOW_LIST_PATTERNS);
+        assertEquals(await peer.put("CLAUDE.md", textFileData("root")), false, "a root file outside the allow-list should be refused");
+        assertEquals(await peer.put("clients/acme/other.md", textFileData("x")), false, "a sibling of an allowed file should be refused");
+        assertEquals(await peer.put("notes/sub/deep.md", textFileData("deep")), true, "a file below an allowed directory should be saved");
+        assertEquals(await peer.put("clients/acme/acme.md", textFileData("acme")), true, "an allowed single file should be saved");
+        const written: string[] = [];
+        for await (const entry of Deno.readDir(tempDir)) written.push(entry.name);
+        assertEquals(written.sort().join(","), "clients,notes", "only allowed trees should exist on disk");
+
+        await Deno.writeTextFile(join(tempDir, "CLAUDE.md"), "placed locally");
+        assertEquals(await peer.delete("CLAUDE.md"), false, "a deletion outside the allow-list should be refused");
+        assertEquals(await Deno.readTextFile(join(tempDir, "CLAUDE.md")), "placed locally", "the local file should stay untouched");
+        assertEquals(await peer.delete("clients/acme/acme.md"), true, "a deletion of an allowed file should be applied");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+Deno.test("PeerStorage still accepts received files at ignored paths without ignoreOnReceive", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-ignore-default-" });
+    try {
+        const { peer } = makeWritePeer(tempDir);
+        peer.config.ignore = ALLOW_LIST_PATTERNS;
+        assertEquals(await peer.put("CLAUDE.md", textFileData("root")), true, "without the option a received file outside the allow-list is still written");
+        assertEquals(await Deno.readTextFile(join(tempDir, "CLAUDE.md")), "root", "the file should be on disk");
+        assertEquals(await peer.delete("CLAUDE.md"), true, "without the option a received deletion is still applied");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+

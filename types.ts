@@ -23,6 +23,8 @@ export interface PeerStorageConf extends PeerPathIdentityConf {
     useChokidar?: boolean;
     /** Glob patterns for paths which are never synchronised, e.g. [".git/**"] */
     ignore?: string[];
+    /** Also refuse incoming writes and deletions at ignored paths (default: only outgoing changes are filtered). */
+    ignoreOnReceive?: boolean;
     handleFilenameCaseSensitive?: boolean;
 }
 export interface PeerCouchDBConf extends DirectFileManipulatorOptions, PeerPathIdentityConf {

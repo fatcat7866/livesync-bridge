@@ -453,6 +453,24 @@ Incoming changes from other peers are still accepted: a file which another peer
 sends is still written, and a deletion which another peer sends is still
 applied, even at an excluded path.
 
+Set `ignoreOnReceive` to `true` to apply the same patterns to incoming changes
+as well: a write or deletion which another peer sends at an excluded path is
+then refused (and logged at debug level), judged exactly like the watcher judges
+an outgoing path. This is what makes an allow-list hold in both directions. An
+allow-list is a single negated brace pattern listing every permitted path and
+all of its parent directories (every prefix of a path is judged, so the parents
+have to be allowed too), with `dir/**` for a whole directory:
+
+```jsonc
+{
+  "type": "storage",
+  "name": "shared-subset",
+  "baseDir": "./vault/",
+  "ignore": ["!{projects,projects/**,clients,clients/acme,clients/acme/acme.md}"],
+  "ignoreOnReceive": true
+}
+```
+
 ## Realistic example
 
 | name                       | database_uri / path                       | CouchDB username | CouchDB password | vault E2EE passphrase | baseDir  |

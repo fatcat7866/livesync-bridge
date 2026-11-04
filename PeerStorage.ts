@@ -128,6 +128,19 @@ export class PeerStorage extends Peer {
         return this.toPosixPath(relative(this.toStoragePath(this.toLocalPath(".")), pathSrc));
     }
 
+    // Whether a received vault path is excluded. Off by default: `ignore` only
+    // decides what the watchers send, and a file received at an ignored path is
+    // still written. With `ignoreOnReceive` the same patterns, judged exactly
+    // like the watchers judge an outgoing path, also refuse incoming writes and
+    // deletions. That is what makes an allow-list (`!{...}`) hold in both
+    // directions: otherwise another peer of the group could place a file outside
+    // the allowed set, and the watcher would stay silent about it afterwards.
+    isIgnoredVaultPath(pathSrc: string): boolean {
+        if (!this.config.ignoreOnReceive) return false;
+        const path = this.toRelativePath(this.toStoragePath(this.toLocalPath(pathSrc)));
+        return this.isIgnored(path);
+    }
+
     async delete(pathSrc: string): Promise<boolean> {
         const access = this.createPathAccess();
         return await this.storageOperation(pathSrc, access, () => this.deleteFile(pathSrc, access));
@@ -135,6 +148,10 @@ export class PeerStorage extends Peer {
     private async deleteFile(pathSrc: string, access?: DenoStoragePathAccess): Promise<boolean> {
         if (this.isUnsafeVaultPath(pathSrc)) {
             this.normalLog(`Delete skipped: ${pathSrc} (the path contains the local path separator)`, LOG_LEVEL_NOTICE);
+            return false;
+        }
+        if (this.isIgnoredVaultPath(pathSrc)) {
+            this.debugLog(`${pathSrc} ignored (delete not applied)`);
             return false;
         }
         let path: string;
@@ -174,6 +191,10 @@ export class PeerStorage extends Peer {
     private async putFile(pathSrc: string, data: FileData, access?: DenoStoragePathAccess): Promise<boolean> {
         if (this.isUnsafeVaultPath(pathSrc)) {
             this.normalLog(`Write skipped: ${pathSrc} (the path contains the local path separator)`, LOG_LEVEL_NOTICE);
+            return false;
+        }
+        if (this.isIgnoredVaultPath(pathSrc)) {
+            this.debugLog(`${pathSrc} ignored (write not applied)`);
             return false;
         }
         const lp = this.toLocalPath(pathSrc);
