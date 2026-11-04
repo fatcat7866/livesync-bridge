@@ -113,7 +113,9 @@ export class PeerStorage extends Peer {
         if (!path) return false;
         const patterns = this.getIgnorePatterns();
         if (patterns.length === 0) return false;
-        const segments = path.split("/");
+        // Patterns are written in NFC; a path that arrives decomposed (NFD, as macOS
+        // file names often are) must be judged the same, or an allowed file is dropped.
+        const segments = path.normalize("NFC").split("/");
         for (let depth = 1; depth <= segments.length; depth++) {
             const candidate = segments.slice(0, depth).join("/");
             if (patterns.some((pattern) => minimatch(candidate, pattern, IGNORE_MATCH_OPTIONS))) {

@@ -1713,6 +1713,22 @@ Deno.test("PeerStorage applies a negated allow-list pattern to received writes a
     }
 });
 
+// Paths written by macOS clients may arrive decomposed (NFD) while the
+// allow-list is written in NFC; both forms must be judged the same.
+Deno.test("PeerStorage judges an NFD path against an NFC allow-list", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-allow-list-nfd-" });
+    try {
+        const { peer } = makeIgnoringWritePeer(tempDir, ["!{files,files/請求書_ご案内.pdf}"]);
+        const nfd = "files/請求書_ご案内.pdf".normalize("NFD");
+        assert(nfd !== "files/請求書_ご案内.pdf", "the test path should really be decomposed");
+        assertEquals(peer.isIgnored(nfd), false, "an NFD path of an allowed file should not be ignored");
+        assertEquals(await peer.put(nfd, textFileData("pdf")), true, "an NFD path of an allowed file should be saved");
+        assertEquals(peer.isIgnored("files/ほか.pdf".normalize("NFD")), true, "an NFD path outside the allow-list should stay ignored");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
 Deno.test("PeerStorage still accepts received files at ignored paths without ignoreOnReceive", async () => {
     const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-ignore-default-" });
     try {
