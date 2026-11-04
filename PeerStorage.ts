@@ -514,7 +514,12 @@ export class PeerStorage extends Peer {
                 this.debugLog(`${relativePath} ignored`);
                 continue;
             }
-            const key = `${event.kind}-${path}`;
+            // scheduleTask() replaces a pending task with the same key, and its keys are
+            // process-wide. Two storage peers watching the same directory (one per hub
+            // group) receive the same events, so the key carries the peer identity;
+            // otherwise the second peer's task would cancel the first peer's and a
+            // deletion would reach only one group.
+            const key = this._getKey(`${event.kind}-${path}`);
             scheduleTask(key, 100, async () => {
                 if (!isCurrent()) return;
                 let existence: Deno.FileInfo | undefined;

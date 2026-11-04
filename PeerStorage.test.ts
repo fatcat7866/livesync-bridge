@@ -1726,3 +1726,31 @@ Deno.test("PeerStorage still accepts received files at ignored paths without ign
     }
 });
 
+// Two storage peers can watch the same directory (one per hub group) so that a
+// file written by one is forwarded by the other. The debounce keys are
+// process-wide, so without the peer name in them the second peer's scheduled
+// task would cancel the first peer's, and a deletion would reach only one group.
+Deno.test("PeerStorage peers sharing a directory each report the same deletion", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-shared-dir-" });
+    try {
+        await Deno.mkdir(join(tempDir, "notes"), { recursive: true });
+        await Deno.writeTextFile(join(tempDir, "notes", "keep.md"), "keep");
+        const first = makeRecordingPeer(tempDir);
+        const second = makeRecordingPeer(tempDir);
+        await first.peer.writeFileStat("notes/keep.md");
+        await second.peer.writeFileStat("notes/keep.md");
+        await Deno.remove(join(tempDir, "notes", "keep.md"));
+
+        const event = { kind: "remove", paths: [join(tempDir, "notes", "keep.md")] } as Deno.FsEvent;
+        first.peer.processFile(event);
+        second.peer.processFile(event);
+
+        await waitFor(() => first.dispatched.length === 1 && second.dispatched.length === 1, "both peers should report the deletion");
+        assertEquals(first.dispatched[0].path, "notes/keep.md", "the first peer should report the deleted file");
+        assertEquals(first.dispatched[0].data, false, "the first peer should report a deletion");
+        assertEquals(second.dispatched[0].path, "notes/keep.md", "the second peer should report the deleted file");
+        assertEquals(second.dispatched[0].data, false, "the second peer should report a deletion");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
