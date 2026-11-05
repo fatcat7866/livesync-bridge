@@ -1,6 +1,8 @@
 # fatcat-lsbridge: LiveSync Bridge between fatcat-share and fatcat-katsuya.
 # Config (with secrets) arrives as the Fly secret LSB_CONFIG_JSON (base64) and is
-# written to /app/dat/config.json. No public services: the Bridge only dials out.
+# written to /app/dat/config.json. The Bridge only dials out; the one public
+# service is the file API (fileapi/, Bearer token = secret LSB_FILEAPI_TOKEN)
+# that vault-mcp reads and writes the replica through.
 app = "fatcat-lsbridge"
 primary_region = "nrt"
 # The first full read of both databases peaks above 512MB (OOM-killed, 2026-11-05).
@@ -21,6 +23,36 @@ swap_size_mb = 1024
   source = "lsbdata"
   destination = "/app/data"
 
+# Two Deno processes (Bridge ≈270MB + file API) did not fit in 512MB without
+# living on swap (measured 2026-11-05 13:4x). KATSUYA approved 1GB the same day.
 [[vm]]
   size = "shared-cpu-1x"
-  memory = "512mb"
+  memory = "1gb"
+
+[[services]]
+  internal_port = 8787
+  protocol = "tcp"
+  # The Bridge must keep running with no inbound traffic.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+    force_https = true
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "get"
+    path = "/health"
+
+# start.sh exits when either process dies; bring the machine back.
+[[restart]]
+  policy = "always"

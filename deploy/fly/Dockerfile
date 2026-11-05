@@ -6,4 +6,5 @@ FROM docker.io/denoland/deno:2.9.7
 WORKDIR /app
 COPY . .
 RUN deno install --frozen
-CMD ["sh", "-c", "mkdir -p /app/data/vault /app/data/location_data && rm -rf /deno-dir/location_data && ln -s /app/data/location_data /deno-dir/location_data && exec deno task run"]
+# Bridge + file API (fileapi/) as two processes; see deploy/fly/start.sh.
+CMD ["bash", "deploy/fly/start.sh"]

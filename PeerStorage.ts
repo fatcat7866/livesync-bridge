@@ -6,7 +6,7 @@ import { format as posixFormat, parse as posixParse } from "@std/path/posix";
 import { serialized, withLock } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
-import { minimatch } from "minimatch";
+import { expandIgnorePatterns, isIgnoredByPatterns } from "./ignorePatterns.ts";
 import { parseFilePath, type PathComparisonSettings } from "@vrtmrz/livesync-commonlib/storage";
 import { DenoStoragePathAccess } from "./DenoStoragePathAccess.ts";
 import { getPeerPathNormalizationVersion } from "./pathIdentity.ts";
@@ -18,11 +18,6 @@ import {
     LOG_LEVEL_NOTICE,
     LOG_LEVEL_VERBOSE,
 } from "octagonal-wheels/common/logger";
-
-// Ignore patterns are matched with minimatch, the same matcher the CouchDB peer uses
-// for `includeInternal`. `dot` is needed because the directories which are worth
-// ignoring at all are usually dot-directories, such as `.git`.
-const IGNORE_MATCH_OPTIONS = { dot: true } as const;
 
 export class PeerStorage extends Peer {
     declare config: PeerStorageConf;
@@ -89,40 +84,18 @@ export class PeerStorage extends Peer {
 
     private ignorePatterns?: string[];
 
-    // The configured patterns, plus the bare directory form of every `dir/**` pattern.
-    // `**/.git/**` matches everything inside `.git` but not `.git` itself, and the
-    // directory itself is exactly what has to be recognised to stay out of the tree.
-    // As a consequence a trailing `/**` also covers the entry with that name.
+    // See ignorePatterns.ts (shared with the file API, so both judge a path alike).
     private getIgnorePatterns(): string[] {
         if (!this.ignorePatterns) {
-            const configured = this.config.ignore ?? [];
-            const directories = configured
-                .filter((pattern) => pattern.endsWith("/**"))
-                .map((pattern) => pattern.slice(0, -"/**".length));
-            this.ignorePatterns = [...configured, ...directories];
+            this.ignorePatterns = expandIgnorePatterns(this.config.ignore ?? []);
         }
         return this.ignorePatterns;
     }
 
-    // Whether a peer-relative POSIX path is excluded from synchronisation.
-    // A path is also excluded when any of its ancestor directories is: the scans
-    // prune an ignored directory, so live events for its descendants have to be
-    // dropped as well, even when a pattern such as `private` or `*.tmp` only
-    // matches the directory itself.
+    // Whether a peer-relative POSIX path is excluded from synchronisation
+    // (ancestors included, NFC-normalised) — see isIgnoredByPatterns.
     isIgnored(path: string): boolean {
-        if (!path) return false;
-        const patterns = this.getIgnorePatterns();
-        if (patterns.length === 0) return false;
-        // Patterns are written in NFC; a path that arrives decomposed (NFD, as macOS
-        // file names often are) must be judged the same, or an allowed file is dropped.
-        const segments = path.normalize("NFC").split("/");
-        for (let depth = 1; depth <= segments.length; depth++) {
-            const candidate = segments.slice(0, depth).join("/");
-            if (patterns.some((pattern) => minimatch(candidate, pattern, IGNORE_MATCH_OPTIONS))) {
-                return true;
-            }
-        }
-        return false;
+        return isIgnoredByPatterns(path, this.getIgnorePatterns());
     }
 
     // Peer-relative POSIX path of an absolute path as the watchers report it.
