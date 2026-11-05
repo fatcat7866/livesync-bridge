@@ -2,6 +2,7 @@ import chokidar from "chokidar";
 import { basename, join } from "@std/path";
 import { LOG_LEVEL_NOTICE } from "octagonal-wheels/common/logger";
 import { serialized } from "octagonal-wheels/concurrency/lock";
+import { getDocData } from "@vrtmrz/livesync-commonlib/compat/common/utils";
 import { PeerStorage } from "./PeerStorage.ts";
 import type { FileData, PeerStorageConf } from "./types.ts";
 
@@ -1766,6 +1767,67 @@ Deno.test("PeerStorage peers sharing a directory each report the same deletion",
         assertEquals(first.dispatched[0].data, false, "the first peer should report a deletion");
         assertEquals(second.dispatched[0].path, "notes/keep.md", "the second peer should report the deleted file");
         assertEquals(second.dispatched[0].data, false, "the second peer should report a deletion");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+// The dispatch debounce used to be coalesced process-wide by path. With two
+// storage peers on one directory, a burst of events for a path (an in-place
+// write of a larger file) let one peer's later procedure replace the other
+// peer's pending one, so that peer never reported the change to its group.
+Deno.test("PeerStorage peers sharing a directory each report the same write under an event burst", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-shared-burst-" });
+    try {
+        const first = makeRecordingPeer(tempDir);
+        const second = makeRecordingPeer(tempDir);
+        // The first peer receives the file from its group and writes it; the
+        // resulting watcher events are a repeat for it, but news for the second peer.
+        assertEquals(await first.peer.put("notes/burst.md", textFileData("burst content")), true, "the received write should be applied");
+        const path = join(tempDir, "notes", "burst.md");
+        // The burst ends with the first peer, so a process-wide "latest waiting"
+        // slot would hold only the first peer's procedure and drop the second's.
+        for (let i = 0; i < 4; i++) {
+            await first.peer.dispatch(path);
+            await second.peer.dispatch(path);
+        }
+        await first.peer.dispatch(path);
+        await waitFor(() => second.dispatched.length === 1, "the second peer should report the write");
+        await serialized(path, () => Promise.resolve());
+        assertEquals(first.dispatched.length, 0, "the first peer should not echo its own write");
+        assertEquals(second.dispatched.length, 1, "the second peer should report the write once");
+        assertEquals(second.dispatched[0].path, "notes/burst.md", "the second peer should report the written file");
+    } finally {
+        await Deno.remove(tempDir, { recursive: true });
+    }
+});
+
+// A peer sharing the directory writes in place and sets the mtime afterwards.
+// The other peer's read must wait for that to finish; otherwise it dispatches
+// a partial file, or the final content with the write-time mtime.
+Deno.test("PeerStorage dispatch waits for an in-place write to settle", async () => {
+    const tempDir = await Deno.makeTempDir({ prefix: "peer-storage-settle-" });
+    try {
+        await Deno.mkdir(join(tempDir, "notes"), { recursive: true });
+        const path = join(tempDir, "notes", "slow.md");
+        const finalMtime = new Date(Date.UTC(2024, 0, 2, 3, 4, 5));
+        await Deno.writeTextFile(path, "partial");
+        const { peer, dispatched } = makeRecordingPeer(tempDir);
+        await peer.dispatch(path);
+        // The write keeps changing the file across the fixed dispatch delay and
+        // finishes (content, then mtime) only after that delay has elapsed.
+        await sleep(100);
+        await Deno.writeTextFile(path, "partial and more");
+        await sleep(200);
+        await Deno.writeTextFile(path, "partial and then complete");
+        await Deno.utime(path, finalMtime, finalMtime);
+        await waitFor(() => dispatched.length === 1, "the write should be reported once");
+        await serialized(path, () => Promise.resolve());
+        const data = dispatched[0].data;
+        if (data === false) throw new Error("the report should carry file data");
+        const text = data.data instanceof Uint8Array ? new TextDecoder().decode(data.data) : getDocData(data.data);
+        assertEquals(text, "partial and then complete", "the final content should be reported");
+        assertEquals(data.mtime, finalMtime.getTime(), "the final mtime should be reported");
     } finally {
         await Deno.remove(tempDir, { recursive: true });
     }

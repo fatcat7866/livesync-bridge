@@ -3,7 +3,7 @@ import { delay, getDocData } from "@vrtmrz/livesync-commonlib/compat/common/util
 import { isPlainText } from "@vrtmrz/livesync-commonlib/compat/string_and_binary/path";
 import { parse, format, relative, dirname, resolve, SEPARATOR, isAbsolute } from "@std/path";
 import { format as posixFormat, parse as posixParse } from "@std/path/posix";
-import { scheduleOnceIfDuplicated, withLock } from "octagonal-wheels/concurrency/lock";
+import { serialized, withLock } from "octagonal-wheels/concurrency/lock";
 import { DispatchFun, Peer, PeerHealth } from "./Peer.ts";
 import chokidar from "chokidar";
 import { minimatch } from "minimatch";
@@ -347,6 +347,63 @@ export class PeerStorage extends Peer {
         }
     }
 
+    // Coalesce watcher bursts per (peer, path). The library's once-if-duplicated
+    // scheduler keeps a single process-wide "latest waiting" procedure per key, so
+    // with two storage peers watching the same directory a later burst from one
+    // peer replaced the other peer's pending procedure and that peer never
+    // reported the change. The path lock itself stays keyed by the path, so callers
+    // (and tests) can still await serialized(path) to wait for every peer's work.
+    private _coalesceRunning = new Set<string>();
+    private _coalesceWaiting = new Map<string, () => Promise<void>>();
+    private scheduleOncePerPeer(pathSrc: string, proc: () => Promise<void>): Promise<void> {
+        const key = this._getKey(`dispatch-${pathSrc}`);
+        if (this._coalesceRunning.has(key)) {
+            this._coalesceWaiting.set(key, proc);
+            return Promise.resolve();
+        }
+        this._coalesceRunning.add(key);
+        // Run the latest waiting procedure inside the same path lock, so that
+        // awaiting serialized(path) covers the whole burst for this peer.
+        return serialized(pathSrc, async () => {
+            let current: (() => Promise<void>) | undefined = proc;
+            while (current) {
+                try {
+                    await current();
+                } catch (ex) {
+                    Logger(ex, LOG_LEVEL_VERBOSE);
+                }
+                current = this._coalesceWaiting.get(key);
+                this._coalesceWaiting.delete(key);
+            }
+            this._coalesceRunning.delete(key);
+        });
+    }
+
+    // A peer sharing this directory writes in place and sets the mtime afterwards.
+    // Wait until two consecutive stats agree so that neither a partially written
+    // file nor the pre-utime mtime is dispatched. A missing file is left to the caller.
+    private async statForSettle(path: string): Promise<{ size: number; mtime: number } | undefined> {
+        try {
+            const stat = await Deno.stat(path);
+            return { size: stat.size, mtime: stat.mtime?.getTime() ?? 0 };
+        } catch (_ex) {
+            return undefined;
+        }
+    }
+    private async waitForWriteToSettle(path: string, isCurrent: () => boolean, before?: { size: number; mtime: number }): Promise<void> {
+        // The first comparison uses the stat taken before the fixed delay, so a file
+        // which was already complete costs no extra wait.
+        let prev = before;
+        for (let i = 0; i < 40; i++) {
+            const cur = await this.statForSettle(path);
+            if (!cur) return;
+            if (prev && prev.size === cur.size && prev.mtime === cur.mtime) return;
+            prev = cur;
+            await delay(250);
+            if (!isCurrent()) return;
+        }
+    }
+
     dispatch(pathSrc: string, access = this.createPathAccess(), isCurrent = () => true): Promise<void> {
         const lP = this.toStoragePath(this.toLocalPath("."));
         const path = this.toPosixPath(relative(lP, pathSrc));
@@ -357,10 +414,13 @@ export class PeerStorage extends Peer {
             return Promise.resolve();
         }
 
-        scheduleOnceIfDuplicated(pathSrc, async () => {
+        this.scheduleOncePerPeer(pathSrc, async () => {
             let data: FileData | false;
             try {
+                const before = await this.statForSettle(pathSrc);
                 await delay(250);
+                if (!isCurrent()) return;
+                await this.waitForWriteToSettle(pathSrc, isCurrent, before);
                 if (!isCurrent()) return;
                 // Read after waiting so a completed incoming update or deletion
                 // supersedes the earlier watcher event's content.
@@ -391,7 +451,7 @@ export class PeerStorage extends Peer {
             this.debugLog(`${path} ignored`);
             return;
         }
-        await scheduleOnceIfDuplicated(pathSrc, async () => {
+        await this.scheduleOncePerPeer(pathSrc, async () => {
             await delay(250);
             if (!isCurrent()) return;
             // A real or emulated deletion can become stale while it waits behind a write.
